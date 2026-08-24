@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { authService } from '../../../../services/di';
+import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
 
 export async function POST(req: NextRequest) {
     try {
@@ -15,8 +16,8 @@ export async function POST(req: NextRequest) {
             cookieStore.delete('sessionToken');
         }
 
-        return NextResponse.json({ success: true }, { status: 200 });
+        return createSuccessResponse(null, 200);
     } catch (error: any) {
-        return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
+        return createErrorResponse(error.message || 'Internal Server Error', 500);
     }
 }

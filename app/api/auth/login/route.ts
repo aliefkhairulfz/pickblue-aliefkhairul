@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { authService } from '../../../../services/di';
+import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
 
 export async function POST(req: NextRequest) {
     try {
@@ -30,13 +31,13 @@ export async function POST(req: NextRequest) {
             path: '/'
         });
 
-        return NextResponse.json({ email: result.email, success: true }, { status: 200 });
+        return createSuccessResponse({ email: result.email }, 200);
     } catch (error: any) {
         // Add comment: Map known errors to proper HTTP statuses
         let status = 400;
         if (error.message === 'Email not found' || error.message === 'Account not found') status = 404;
         else if (error.message === 'Password does not match') status = 401;
 
-        return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status });
+        return createErrorResponse(error.message || 'Internal Server Error', status);
     }
 }

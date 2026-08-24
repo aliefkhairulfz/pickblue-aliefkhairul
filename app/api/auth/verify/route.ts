@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { authService } from '../../../../services/di';
+import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
 
 export async function POST(req: NextRequest) {
     try {
@@ -12,13 +13,13 @@ export async function POST(req: NextRequest) {
             token
         });
 
-        return NextResponse.json(result, { status: 200 });
+        return createSuccessResponse(result, 200);
     } catch (error: any) {
         // Add comment: Handle appropriate status codes
         let status = 400;
         if (error.message === 'Email not found' || error.message === 'Verification token not found') status = 404;
         else if (error.message === 'Email already verified' || error.message === 'Verification token has expired') status = 400;
 
-        return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status });
+        return createErrorResponse(error.message || 'Internal Server Error', status);
     }
 }
