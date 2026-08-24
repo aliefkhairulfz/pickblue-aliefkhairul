@@ -1,19 +1,25 @@
 import argon2 from 'argon2';
-import { addDays, isPast } from 'date-fns';
-import { and, eq, inArray } from 'drizzle-orm';
+import { addDays, addMinutes, isPast } from 'date-fns';
+import { and, eq, inArray, lt } from 'drizzle-orm';
 import { Resend } from 'resend';
 import { db, DbConnection } from '../db';
 import { accounts, roles, sessions, userRoles, users, verifications } from '../db/schema/auth';
 import { HashService } from './hash.service';
 
-export type RegisterArgs = {
+export type RegisterSchema = {
+    email: string;
+};
+
+export type RegisterUserParams = {
     name: string;
     email: string;
     password?: string;
-    providerId: 'credentials' | 'google';
+    role: 'user' | 'creator';
+    token: string;
+    providerId: string;
 };
 
-export type LoginArgs = {
+export type LoginParams = {
     email: string;
     password?: string;
     providerId: string;
@@ -21,190 +27,199 @@ export type LoginArgs = {
     userAgent?: string;
 };
 
-export type RegisterVerificationArgs = {
-    email: string;
+export type AccountVerificationParams = {
     token: string;
+    email: string;
+};
+
+export type LogoutParams = {
+    user: { sessionId: string; [key: string]: any };
+};
+
+export type GetAuthenticatedUserParams = {
+    sessionToken: string;
 };
 
 export class AuthService {
     constructor(
         private readonly db: DbConnection,
         private readonly mail: Resend,
-        private readonly hashService: HashService,
+        private readonly hashService: HashService
     ) {}
 
-    /** Register a new user with credentials provider — inserts user + account, sends verification email. */
-    public async register(args: RegisterArgs) {
-        if (args.providerId === 'credentials') {
-            if (!args.password) throw new Error('Password is required for credentials provider');
+    public async register(params: RegisterSchema) {
+        // Add comment: Check if user already exists
+        const [user] = await this.db.select().from(users).where(eq(users.email, params.email));
+        if (user) throw new Error('User Already Exists');
 
-            const [existingUser] = await this.db.select().from(users).where(eq(users.email, args.email));
-            // Add comment: Check if user already exists
-            if (existingUser) throw new Error('Email is already in use');
+        // Add comment: Generate verification token
+        const { rawToken, hashedToken } = this.hashService.generateTokenWithHash();
 
-            // Add comment: Insert new user
-            const [user] = await this.db
+        await this.db.insert(verifications).values({
+            type: 'register_verification' as any,
+            tokenHash: hashedToken,
+            expiredAt: addMinutes(new Date(), 15)
+        });
+
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const redirectUrl = `${frontendUrl}/register-verification?e=${params.email}&t=${rawToken}`;
+
+        // Add comment: Send verification email
+        const sendEmail = await this.mail.emails.send({
+            from: `FT3 <verification@${process.env.APP_MAIL_NAME || 'example.com'}>`,
+            to: params.email,
+            subject: 'Account Verification',
+            html: `<p>Please complete your registration by clicking <a href="${redirectUrl}">here</a>.</p>`
+        });
+
+        if (sendEmail.error !== null) throw new Error('Sending Email Failed');
+
+        return { email: params.email };
+    }
+
+    public async registerUser(params: RegisterUserParams) {
+        return await this.db.transaction(async tx => {
+            // find verification token
+            const [verification] = await tx
+                .select()
+                .from(verifications)
+                .where(and(eq(verifications.tokenHash, this.hashService.hashToken(params.token)), eq(verifications.type, 'register_verification' as any)));
+
+            if (!verification) throw new Error('Register Verification Not Found');
+            if (isPast(verification.expiredAt)) throw new Error('Verification Token Expired');
+
+            // insert user
+            const [user] = await tx
                 .insert(users)
                 .values({
-                    name: args.name,
-                    email: args.email,
+                    name: params.name,
+                    email: params.email,
+                    verifiedAt: new Date()
                 })
                 .returning();
 
-            // Add comment: Hash the password and create account
-            const hashedPassword = await argon2.hash(args.password);
-            const [account] = await this.db
-                .insert(accounts)
-                .values({
+            // insert account
+            if (params.password) {
+                const hashPassword = await argon2.hash(params.password);
+                await tx.insert(accounts).values({
                     userId: user.id,
-                    accountId: user.id, // for credentials, accountId is userId
-                    providerId: args.providerId,
-                    password: hashedPassword,
-                })
-                .returning();
+                    accountId: user.id,
+                    providerId: params.providerId,
+                    password: hashPassword
+                });
+            }
 
-            await this.defineUserRoles(user.email, user.id);
+            // set role
+            const [role] = await tx.select().from(roles).where(eq(roles.name, params.role));
+            if (!role) throw new Error('Role Not Seeded');
 
-            // Add comment: Generate and store verification token
-            const { rawToken, hashedToken } = this.hashService.generateTokenWithHash();
-            await this.db.insert(verifications).values({
-                userId: user.id,
-                type: 'email_verification',
-                tokenHash: hashedToken,
-                expiredAt: addDays(new Date(), 1),
-            });
+            await tx.insert(userRoles).values({ roleId: role.id, userId: user.id });
 
-            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-            const redirectUrl = `${frontendUrl}/register-verification?e=${args.email}&t=${rawToken}`;
-            
-            // Add comment: Send verification email
-            const sendEmail = await this.mail.emails.send({
-                from: `FT3 <verification@${process.env.APP_MAIL_NAME || 'example.com'}>`,
-                to: args.email,
-                subject: 'Email Verification',
-                html: `<p>Please verify your email by clicking <a href="${redirectUrl}">here</a>.</p>`, // Simplified template
-            });
-            if (sendEmail.error !== null) throw new Error('Sending email failed');
+            // Note: Omitted creatorBalances since we are explicitly ONLY doing auth/authz
+            await tx.delete(verifications).where(eq(verifications.id, verification.id));
 
-            return {
-                name: user.name,
-                email: user.email,
-                account: { userId: account.userId, providerId: account.providerId },
-                verificationUrl: redirectUrl,
-            };
-        } else {
-            throw new Error('Social login not implemented');
-        }
+            return user;
+        });
     }
 
-    /** Authenticate user with credentials — validates password, creates session, returns raw session token. */
-    public async login(args: LoginArgs) {
-        if (args.providerId === 'credentials') {
-            if (!args.password) throw new Error('Password is required for credentials provider');
+    public async login(params: LoginParams) {
+        return await this.db.transaction(async tx => {
+            // find user
+            const [user] = await tx.select().from(users).where(eq(users.email, params.email));
+            if (!user) throw new Error('User Not Found');
 
-            // Add comment: Find user by email
-            const [user] = await this.db.select().from(users).where(eq(users.email, args.email));
-            if (!user) throw new Error('Email not found');
-
-            // Add comment: Find account linked to user
-            const [account] = await this.db
+            // find account
+            const [account] = await tx
                 .select()
                 .from(accounts)
-                .where(and(eq(accounts.userId, user.id)));
-            if (!account || !account.password) throw new Error('Account not found');
+                .where(and(eq(accounts.userId, user.id), eq(accounts.providerId, params.providerId)));
+            if (!account) throw new Error('Account Not Found');
 
-            // Add comment: Verify password using argon2
-            const isPasswordValid = await argon2.verify(account.password, args.password);
-            if (!isPasswordValid) throw new Error('Password does not match');
+            // compare password
+            if (params.providerId === 'credentials' && params.password) {
+                const isPasswordValid = await argon2.verify(account.password as string, params.password);
+                if (!isPasswordValid) throw new Error('Invalid Password');
+            }
 
-            // Add comment: Generate session token and store in DB
+            // fetch user roles
+            const userRolesData = await tx.select().from(userRoles).leftJoin(roles, eq(userRoles.roleId, roles.id)).where(eq(userRoles.userId, user.id));
+
+            const userWithRoles = {
+                ...user,
+                userRoles: userRolesData.map(r => ({ role: r.roles! }))
+            };
+
+            // sessions && tokens
             const { rawToken, hashedToken } = this.hashService.generateTokenWithHash();
-            await this.db.insert(sessions).values({
-                userId: user.id,
+
+            await tx.insert(sessions).values({
                 token: hashedToken,
-                expiredAt: addDays(new Date(), 7),
-                ipAddress: args.ipAddress,
-                userAgent: args.userAgent,
+                userId: user.id,
+                ipAddress: params.ipAddress,
+                userAgent: params.userAgent,
+                expiredAt: addDays(new Date(), 7)
             });
 
-            return { email: args.email, sessionToken: rawToken };
-        } else {
-             throw new Error('Social login not implemented');
-        }
+            return { sessionToken: rawToken, user: userWithRoles };
+        });
     }
 
-    /** Verify a user's email address using the verification token sent at registration. */
-    public async registerVerification(args: RegisterVerificationArgs) {
-        // Add comment: Look up user by email
-        const [user] = await this.db.select().from(users).where(eq(users.email, args.email));
-        if (!user) throw new Error('Email not found');
-        if (user.verifiedAt) throw new Error('Email already verified');
+    public async logout(params: LogoutParams) {
+        const [destroyed] = await this.db.delete(sessions).where(eq(sessions.id, params.user.sessionId)).returning();
+        if (!destroyed) throw new Error('Session Not Found');
+        return destroyed;
+    }
 
-        // Add comment: Verify token hash matches DB record
-        const hashedToken = this.hashService.hashToken(args.token);
+    public async accountVerification(params: AccountVerificationParams) {
         const [verification] = await this.db
             .select()
             .from(verifications)
-            .where(and(eq(verifications.userId, user.id), eq(verifications.tokenHash, hashedToken), eq(verifications.type, 'email_verification')));
-        if (!verification) throw new Error('Verification token not found');
-        if (isPast(verification.expiredAt)) throw new Error('Verification token has expired');
+            .where(eq(verifications.tokenHash, this.hashService.hashToken(params.token)));
+        if (!verification) throw new Error('Verification Not Found');
+        if (isPast(verification.expiredAt)) throw new Error('Verification Token Expired');
 
-        // Add comment: Mark user as verified and delete token
-        await this.db.update(users).set({ verifiedAt: new Date() }).where(eq(users.id, user.id));
-        await this.db.delete(verifications).where(eq(verifications.id, verification.id));
-
-        return { email: user.email, verified: true };
-    }
-
-    /** Delete a session by its raw token (hashed before query). */
-    public async logout(sessionToken: string) {
-        const hashedToken = this.hashService.hashToken(sessionToken);
-        // Add comment: Delete session from DB
-        await this.db.delete(sessions).where(eq(sessions.token, hashedToken));
-    }
-
-    /** Resolve authenticated user from raw session token — validates session, fetches user + roles. (Caching removed per user request) */
-    public async getAuthenticatedUser(sessionToken: string) {
-        const hashedToken = this.hashService.hashToken(sessionToken);
-        
-        // Add comment: Look up active session
-        const [session] = await this.db.select({ expiresAt: sessions.expiredAt, userId: sessions.userId }).from(sessions).where(eq(sessions.token, hashedToken));
-        if (!session) throw new Error('Unauthorized, session not found');
-        if (isPast(session.expiresAt)) throw new Error('Unauthorized, session expired');
-
-        // Add comment: Fetch user info
         const [user] = await this.db
-            .select({
-                id: users.id,
-                name: users.name,
-                email: users.email,
-                verifiedAt: users.verifiedAt,
-                image: users.image,
-            })
-            .from(users)
-            .where(eq(users.id, session.userId));
-        if (!user) throw new Error('Unauthorized, user not found');
+            .update(users)
+            .set({ verifiedAt: new Date() })
+            .where(eq(users.id, verification.userId as string))
+            .returning();
 
-        // Add comment: Fetch user roles
-        const userRolesData = await this.db.select().from(userRoles).leftJoin(roles, eq(userRoles.roleId, roles.id)).where(eq(userRoles.userId, user.id));
-        const userWithRoles = { ...user, roles: userRolesData.map(userRole => userRole.roles?.name).filter(r => r !== undefined) };
-
-        return userWithRoles;
+        return user;
     }
 
-    /** Define User Roles. */
-    private async defineUserRoles(email: string, userId: string) {
-        // Add comment: Get role IDs from DB
-        const getRoles = await this.db
-            .select({ id: roles.id, name: roles.name })
-            .from(roles)
-            .where(inArray(roles.name, ['user', 'admin']));
+    public async getAuthenticatedUser(params: GetAuthenticatedUserParams) {
+        return await this.db.transaction(async tx => {
+            const [user] = await tx
+                .select({
+                    sessionId: sessions.id,
+                    userId: users.id,
+                    name: users.name,
+                    email: users.email,
+                    verifiedAt: users.verifiedAt
+                })
+                .from(sessions)
+                .leftJoin(users, eq(sessions.userId, users.id))
+                .where(eq(sessions.token, this.hashService.hashToken(params.sessionToken)));
 
-        // Add comment: Assign admin role to specific email, otherwise default to user role
-        if (email === 'admin@ft3.id') {
-            await this.db.insert(userRoles).values(getRoles.filter(r => r.name !== 'user').map(r => ({ userId: userId, roleId: r.id })));
-        } else {
-            await this.db.insert(userRoles).values(getRoles.filter(r => r.name === 'user').map(r => ({ userId: userId, roleId: r.id })));
-        }
+            if (!user || !user.userId || !user.name || !user.email) {
+                throw new Error('Session Not Found');
+            }
+
+            const usrRoles = await tx.select({ name: roles.name }).from(userRoles).leftJoin(roles, eq(userRoles.roleId, roles.id)).where(eq(userRoles.userId, user.userId));
+
+            return {
+                sessionId: user.sessionId,
+                userId: user.userId,
+                name: user.name,
+                email: user.email,
+                verifiedAt: user.verifiedAt,
+                roles: usrRoles.map(r => r.name)
+            };
+        });
+    }
+
+    public async clearSession() {
+        const now = new Date();
+        await this.db.delete(sessions).where(lt(sessions.expiredAt, now));
     }
 }

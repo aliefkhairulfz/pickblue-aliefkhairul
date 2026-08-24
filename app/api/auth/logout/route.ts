@@ -1,23 +1,23 @@
+import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { NextRequest } from 'next/server';
-import { authService } from '../../../../services/di';
-import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
+import { authService } from '@/services/di';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
     try {
-        // Add comment: Read session token from cookie
         const cookieStore = await cookies();
         const sessionToken = cookieStore.get('sessionToken')?.value;
-
-        if (sessionToken) {
-            // Add comment: Invalidate session in DB
-            await authService.logout(sessionToken);
-            // Add comment: Clear cookie
-            cookieStore.delete('sessionToken');
+        
+        if (!sessionToken) {
+            return NextResponse.json({ ok: false, statusCode: 401, message: 'Unauthorized', errors: null }, { status: 401 });
         }
 
-        return createSuccessResponse(null, 200);
+        const currentUser = await authService.getAuthenticatedUser({ sessionToken });
+        await authService.logout({ user: currentUser });
+        
+        cookieStore.delete('sessionToken');
+
+        return NextResponse.json({ ok: true, statusCode: 200, message: 'Logout Sucessful', data: { email: currentUser.email } }, { status: 200 });
     } catch (error: any) {
-        return createErrorResponse(error.message || 'Internal Server Error', 500);
+        return NextResponse.json({ ok: false, statusCode: 500, message: 'Internal Server Error', errors: error.message }, { status: 500 });
     }
 }

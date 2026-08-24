@@ -1,25 +1,22 @@
-import { cookies } from 'next/headers';
-import { NextRequest } from 'next/server';
-import { authService } from '../../../../services/di';
-import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
+import { NextResponse } from 'next/server';
+import { authService } from '@/services/di';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
     try {
         const body = await req.json();
-        const { name, email, password, providerId } = body;
+        const { email } = body;
 
-        // Add comment: Delegate logic to AuthService
-        const result = await authService.register({
-            name,
-            email,
-            password,
-            providerId: providerId || 'credentials'
-        });
+        if (!email) {
+            return NextResponse.json({ ok: false, statusCode: 400, message: 'Email is required', errors: null }, { status: 400 });
+        }
 
-        return createSuccessResponse(result, 201);
+        const data = await authService.register({ email });
+
+        return NextResponse.json({ ok: true, statusCode: 201, message: 'Register Successful', data }, { status: 201 });
     } catch (error: any) {
-        // Add comment: Handle errors gracefully, map common error messages to status codes if needed
-        const status = error.message === 'Email is already in use' ? 409 : 400;
-        return createErrorResponse(error.message || 'Internal Server Error', status);
+        if (error.message === 'User Already Exists') {
+            return NextResponse.json({ ok: false, statusCode: 409, message: error.message, errors: null }, { status: 409 });
+        }
+        return NextResponse.json({ ok: false, statusCode: 500, message: 'Internal Server Error', errors: error.message }, { status: 500 });
     }
 }

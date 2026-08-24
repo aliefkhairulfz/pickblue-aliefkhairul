@@ -8,7 +8,7 @@ export function createSuccessResponse(data: any = {}, statusCode: number = 200) 
     return NextResponse.json(
         {
             ok: true,
-            status_code: statusCode,
+            statusCode: statusCode,
             message: createMessage,
             data: createData,
             meta: createMeta
@@ -21,7 +21,7 @@ export function createErrorResponse(message: string, statusCode: number = 400, e
     return NextResponse.json(
         {
             ok: false,
-            status_code: statusCode,
+            statusCode: statusCode,
             message: message,
             errors: typeof errors !== 'object' ? [] : errors
         },

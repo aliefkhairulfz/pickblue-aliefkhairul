@@ -16,7 +16,7 @@ export async function getCurrentUser() {
         }
 
         // Add comment: Get user from DB via AuthService using the token
-        const user = await authService.getAuthenticatedUser(sessionToken);
+        const user = await authService.getAuthenticatedUser({ sessionToken });
         return user;
     } catch (error) {
         // Add comment: Return null if session is invalid/expired

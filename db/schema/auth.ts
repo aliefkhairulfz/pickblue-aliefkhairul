@@ -59,7 +59,7 @@ export const verifications = pgTable('verifications', {
     id: uuid('id').primaryKey().defaultRandom(),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     /** Token type: email_verification, password_reset, or order_confirmation. */
-    type: text('type').$type<'email_verification' | 'password_reset' | 'order_confirmation'>().notNull(),
+    type: text('type').$type<'register_verification' | 'account_verification' | 'email_verification' | 'password_reset' | 'order_confirmation'>().notNull(),
     /** HMAC-SHA256 hash of the raw verification token. */
     tokenHash: text('token_hash').notNull(),
     /** Optional numeric code for alternative verification. */

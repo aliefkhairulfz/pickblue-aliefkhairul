@@ -1,19 +1,16 @@
+import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { NextRequest } from 'next/server';
-import { authService } from '../../../../services/di';
-import { createSuccessResponse, createErrorResponse } from '../../../../utils/response';
+import { authService } from '@/services/di';
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
     try {
         const body = await req.json();
         const { email, password, providerId } = body;
+        
+        const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
+        const userAgent = req.headers.get('user-agent') || 'Unknown';
 
-        // Add comment: Extract IP and User-Agent for session tracking
-        const ipAddress = req.headers.get('x-forwarded-for') || req.headers.get('remote-addr') || 'unknown';
-        const userAgent = req.headers.get('user-agent') || 'unknown';
-
-        // Add comment: Delegate logic to AuthService
-        const result = await authService.login({
+        const { sessionToken, user } = await authService.login({
             email,
             password,
             providerId: providerId || 'credentials',
@@ -21,9 +18,9 @@ export async function POST(req: NextRequest) {
             userAgent
         });
 
-        // Add comment: Set HttpOnly cookie for session token
+        // Set session cookie
         const cookieStore = await cookies();
-        cookieStore.set('sessionToken', result.sessionToken, {
+        cookieStore.set('sessionToken', sessionToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'lax',
@@ -31,13 +28,25 @@ export async function POST(req: NextRequest) {
             path: '/'
         });
 
-        return createSuccessResponse({ email: result.email }, 200);
-    } catch (error: any) {
-        // Add comment: Map known errors to proper HTTP statuses
-        let status = 400;
-        if (error.message === 'Email not found' || error.message === 'Account not found') status = 404;
-        else if (error.message === 'Password does not match') status = 401;
+        return NextResponse.json({
+            ok: true,
+            statusCode: 200,
+            message: 'Login Successful',
+            data: {
+                name: user.name,
+                email: user.email,
+                verifiedAt: user.verifiedAt,
+                roles: user.userRoles.map(r => r.role.name)
+            }
+        }, { status: 200 });
 
-        return createErrorResponse(error.message || 'Internal Server Error', status);
+    } catch (error: any) {
+        if (error.message === 'User Not Found' || error.message === 'Account Not Found') {
+            return NextResponse.json({ ok: false, statusCode: 404, message: error.message, errors: null }, { status: 404 });
+        }
+        if (error.message === 'Invalid Password') {
+            return NextResponse.json({ ok: false, statusCode: 401, message: error.message, errors: null }, { status: 401 });
+        }
+        return NextResponse.json({ ok: false, statusCode: 500, message: 'Internal Server Error', errors: error.message }, { status: 500 });
     }
 }
